@@ -1,0 +1,1327 @@
+---
+title: "Replication materials: Final term paper"
+author: "Marie-Lou Sohnius"
+date: "23rd of June 2021"
+output:
+  pdf_document:
+    toc: no
+    includes:
+      in_header: header.tex
+  html_document:
+    toc: no
+  html_notebook:
+    toc: no
+---
+
+The following file replicates the figures and tables presented in the paper "Civis Economicus - Analysing the effect of local and national crisis exposure on support of anti-democratic reforms " by Marie-Lou Sohnius in the context of the course "Advanced Quantitative Methods".
+
+
+# Contents of the replication packet
+
+## Data
+ - **Mannheim Corona Study:** Please note that the Mannheim Corona Study data accompanying the replication files is highly confidential and can not be used for any other purpose than replicating the presented analyses. I already restricted the original study to a selected, highly limited, and anonymised datatset to protect individuals from being identified using the spatial information. For more information on using the data for personal research, please visit [the German Internet Panel's webpage](https://www.uni-mannheim.de/en/gip/corona-study/).
+
+ - **RKI Daily Population Data:**Daily Data on Local and National Infection rates.
+ - **PLZ Data:**Used for connecting zipcodes (PLZs) to local districts.
+ - **District-level Data:** Additional information on districts collected by the Bundesagentur für Arbeit Statistik. For further information see the Appendix.
+ - **Weeks:**Data on weeks and dates needed for merging.
+ 
+## Code
+ - **README.rmd** is the main replication file replicating all presented graphs and tables.
+ - **regional_data_prep.R** is the code used to combine the over 10,000 local files by the Bundesagentur für Arbeit Statistik to generate the data used in our small area estimation. As space on all of our local machines (including yours!) is limited, I decided not to append the files.
+
+
+
+# Main Analyses
+
+
+```{r setup, include=FALSE}
+
+## clear working memory
+rm(list=ls())
+
+# The first line sets an option for the final document that can be produced from
+# the .Rmd file. Don't worry about it.
+knitr::opts_chunk$set(echo = TRUE)
+
+# The next bit (lines 50-69) is quite powerful and useful. 
+# First we define which packages we need for our analysis and assign it to 
+# the p_needed object. 
+p_needed <-
+    c(
+    "dplyr",
+    "data.table",
+    "ggplot2",
+    "readxl",
+    "gridExtra",
+    "viridis",
+    "MASS",
+    "lme4",
+    "stargazer",
+    "haven",
+    "sf"
+  )
+
+# Now we check which packages are already installed on your computer.
+# The function installed.packages() returns a vector with all the installed 
+# packages.
+packages <- rownames(installed.packages())
+# Then we check which of the packages you need are not installed on your 
+# computer yet. Essentially we compare the vector p_needed with the vector
+# packages. The result of this comparison is assigned to p_to_install.
+p_to_install <- p_needed[!(p_needed %in% packages)]
+# If at least one element is in p_to_install we then install those missing
+# packages.
+if (length(p_to_install) > 0) {
+  install.packages(p_to_install)
+}
+# Now that all packages are installed on your computer, we can load them for
+# this project. Additionally the expression returns whether the packages were
+# successfully loaded.
+sapply(p_needed, require, character.only = TRUE)
+
+
+# Let's set the working directory to the current file location of this file.
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+
+## Other paths
+# old.MCS.path <-
+#   "this is disclosed for data security reasons"
+
+## MCS data
+# MCS <-
+#   read_dta(old.MCS.path) # no missing ids, tn, or week; 54696 tns and 15496 non-tns;
+# 
+# MCS <- MCS %>% dplyr::select(dMonth, dDay, SCDX002, SCDX003,SCPX004)
+# 
+# save(MCS, file = "data/MCS_anonymous.RData")
+
+
+infections.germany <-
+    "data/Infections_Germany.Rdata"
+rki.daily.pop <-
+    "data/rki.daily.pop.Rdata"
+plz <-
+    "data/plz.Rdata"
+weeks <-
+    "data/weeks.csv"
+
+load("data/regional_data_percentages.Rdata")
+
+load("data/MCS_anonymous.Rdata")
+
+## infections data national (ECDC via RKI)
+load(infections.germany)
+inf.nat <- merged_datarep[c(1:5, 7, 9)]
+#inf.nat <- inf.nat[5:117,]
+inf.nat <- inf.nat[79:191, ]
+inf.nat$date <-
+  as.Date(paste0("2020-", inf.nat$month, "-", inf.nat$day))
+
+## infections data local (RKI)
+load(rki.daily.pop)
+inf_loc <-
+  subset(rki.daily,
+         date >= "2020-03-20" &
+           date <= "2020-07-10" ,
+         select = c(kreis:total.death))
+
+## merge data: add national infections to MCS
+MCS$date <-
+  as.Date(paste0("2020-", MCS$dMonth, "-", MCS$dDay)) # date is missing whenever someone did not participate
+data.nat <- merge(MCS, inf.nat, by = "date")
+# data includes all cases with Teilnahme==1
+
+## merge data: add local infections
+data.nat$SCDX002 <-
+  as.character(formatC(
+    data.nat$SCDX002,
+    width = 5,
+    format = "d",
+    flag = "0"
+  )) #reformat MCS PLZ for proper merging
+
+load(plz) # this is a document that connects plzs to kreise
+data.key <-
+  merge(data.nat,
+        plz,
+        by.x = "SCDX002",
+        by.y = "plz",
+        all.x = TRUE) # add Kreise to MCS data for merging with local infections data
+data.key$kreis <- data.key$kreis_1
+
+data.key$na.data <- is.na(data.key$kreis_1)
+table(data.key$na.data) # 2131 cases with kreis_1== NA, 52565 non-missing cases
+
+data <- full_join(inf_loc, data.key, by = c("kreis" , "date"))
+
+
+#select variables
+data <-
+  subset(
+    data,
+    select = c(
+      kreis, date, day.cases, SCDX002,SCDX003,SCPX004, cases_ECDC, kreis_1, landkreis_1
+    )
+  )
+
+data$SCDX003 <- as.character(data$SCDX003)
+
+# leading0  plz 
+data$SCDX003 <- 
+  ifelse((nchar(data$SCDX003) == 4),
+       paste0("0",data$SCDX003),
+       data$SCDX003)
+
+
+# Prep and merge data
+data <- data %>% dplyr::rename(AGS5=kreis) %>% dplyr::left_join(combined, by="AGS5") %>% dplyr::filter(!is.na(AGS5))
+
+data <- data %>% 
+  dplyr::group_by(date) %>% 
+  dplyr::mutate(cases_ECDC = mean(cases_ECDC, na.rm = TRUE)) %>% 
+  ungroup()
+  
+
+df <-
+  data # save in new df in case we want to come back to the raw data
+
+# Recode missings
+df$SCPX004[which(df$SCPX004==-99)] <- NA
+
+# Estimate case share of maximum
+df$local <- df$day.cases/max(df$day.cases)
+df$national <- df$cases_ECDC/max(df$cases_ECDC)
+
+# Set more intuitive var names
+df <- df %>% dplyr::rename(rights_gov = SCPX004, state = bundesland)
+
+```
+
+## Global Smoothing
+Before beginning with the analyses, I use global smoothing to improve local estimates.
+
+```{r Global Smoothing, warning = FALSE}
+
+# Model Small Area Estimates
+
+model_rights_gov <- lmer(rights_gov ~ males_working_kreis_perc +
+                          females_working_kreis_perc +
+                          foreigners_working_kreis_perc +
+                          younger25_working_kreis_perc +
+                          older55_working_kreis_perc +
+                          commuter_working_kreis_perc +
+                          males_nonworking_kreis_perc +
+                          females_nonworking_kreis_perc +
+                          foreigners_nonworking_kreis_perc +
+                          younger25_nonworking_kreis_perc +
+                          older55_non_working_kreis_perc +
+                          longterm_nonworking_kreis_perc +
+                          vs_cdu_kreis +
+                          vs_csu_kreis +
+                          vs_spd_kreis +
+                          vs_green_kreis +
+                          vs_fdp_kreis +
+                          vs_afd_kreis +
+                          vs_left_kreis +
+                          (1 | state),
+                         na.action = na.exclude,
+                         data = df)
+
+
+
+
+# Save Predictions
+df$predicted_rights <-
+  predict(model_rights_gov,
+          newdata = df,
+          allow.new.levels = TRUE)
+
+
+df <-
+  df %>% dplyr::group_by(AGS5) %>% dplyr::mutate(avg_opinion = mean(rights_gov, na.rm =
+                                                       T),
+                                  ags5_num = as.numeric(AGS5))
+
+df <- df %>% distinct(date, AGS5, .keep_all = T) 
+
+
+# Plot that everything worked
+pdf("figures/smooth.pdf",
+    width = 8,
+    height = 5)
+par(mfrow = c(1, 2),
+    mar = c(5.1, 6.1, 4.1, 2.1))
+plot(df$AGS5,
+     df$avg_opinion,
+     ylab = "Public Opinion",
+     main = "Before Global Smoothing",
+     xlim = c(min(df$ags5_num),max(df$ags5_num)),
+     xlab = "",
+     frame.plot=TRUE,
+     xaxt = "n"
+)
+x <- mean(df$predicted_rights, na.rm = T)
+abline(h = x,
+       col = "red")
+
+z <- mean(df$predicted_rights, na.rm = T)
+plot(df$AGS5,
+     df$predicted_rights,
+     xlim = c(min(df$ags5_num),max(df$ags5_num)),
+     ylim = c(1,7),
+     ylab = "Public Opinion",
+     main = "After Global Smoothing",
+     xlab = "",
+     frame.plot=TRUE,
+     xaxt = "n"
+)
+abline(h = z,
+       col = "red")
+dev.off()
+
+```
+## Visual Inference
+
+To provide you with an initial glimpse on the data, I plot maps visualing cases and predicted support for the 1st of April across Germany.
+
+```{r Maps, warning = FALSE}
+
+
+bds <- st_read("data/shp/vg2500_krs.shp")
+
+plot <-
+  df %>% dplyr::filter(date == "2020-04-01") %>% dplyr::select(AGS5, day.cases, predicted_rights, local) %>% mutate(RS =
+                                                                                                                      as.factor(AGS5),
+                                                                                                                    log.cases = ifelse(day.cases == 0, 0, log(day.cases)))
+
+plot <- dplyr::left_join(bds, plot, by = "RS")
+
+pdf("figures/map1.pdf",
+    width = 8,
+    height = 5)
+
+plot(plot["log.cases"], nbreaks = 10, main = "Logged cases on 1 April 2020")
+dev.off()
+
+
+pdf("figures/map2.pdf",
+    width = 8,
+    height = 5)
+
+plot(plot["predicted_rights"], nbreaks = 10, main = "Predicted Support of Reform")
+
+dev.off()
+```
+
+
+## Base Model
+
+This is my base model of national and local cases on support.
+```{r Main Model (no interaction), warning = FALSE}
+
+# Estimate and store the main model
+
+m1 <- (lm(predicted_rights ~ local + national + factor(state), df))
+
+
+```
+
+## Statistical Simulation
+Here I define the simulation function needed for later analyses.
+
+```{r Define simulation function, warning = FALSE}
+
+stochastic_component <- function(ndraws, p) {
+  rbinom(n = ndraws, size = 1, prob = p)
+}
+
+sim_function <-
+  function(seed = 23062021,
+           nsim = 10000,
+           coefs,
+           vcov,
+           scenario,
+           predicted_values = F,
+           stochastic_component) {
+    
+    if (is.null(dim(scenario))) {
+      stop("The scenario needs to be in a matrix.")
+    }
+    
+    if (length(coefs) != ncol(scenario)) {
+      stop("The scenario and the parameter vector don't fit.")
+    }
+    
+    set.seed(seed)
+    
+    # Set up the sampling distribution
+    S <- mvrnorm(nsim, coefs, vcov)
+    
+    # Calculate mu and p
+    
+    # The linear component
+    ev <- S %*% t(scenario)
+    
+    
+    if (predicted_values) {
+      pv <-
+        array(stochastic_component(ndraws = prod(dim(ev)), p = ev), 
+              dim = dim(ev))
+      return(list(ev = ev, pv = pv))
+    }
+    return(list(ev = ev))
+    
+  }
+
+
+```
+
+In the following chunk I simulate expected values and first differences for the base model. Scenario 1 fixes local cases at a share of 0.1 of maximum daily cases while scenario fixes national cases at a share of 0.1 of maximum daily cases. Each scenario then ranges across the respective other variable.
+
+
+```{r Simulate EVs and FDs for M1 across cases, warning = FALSE}
+
+national_seq <- seq(0,1, length.out = 100)
+local_seq <-    seq(0,1, length.out = 100)
+
+
+scenario1 <- cbind(1, 0.1, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+scenario2 <- cbind(1, local_seq, 0.1,   0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+
+national_sim <- sim_function(coefs = coef(m1),
+                    vcov =  vcov(m1),
+                    scenario = scenario1,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+local_sim <- sim_function(coefs = coef(m1),
+                    vcov =  vcov(m1),
+                    scenario = scenario2,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+QoI_ci_national <- apply(national_sim, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_local <- apply(local_sim, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+fd <- local_sim - national_sim
+
+mean_fd <- mean(fd)
+ci_fd <- quantile(fd, c(0.025, 0.975))
+
+```
+
+This part plots and exports the values generated above and is the basis for figure 4.
+
+
+```{r Plot the results of M1 Simulation, warning = FALSE}
+
+pdf("figures/m1_ev.pdf",
+    width = 8,
+    height = 5)
+
+par(mfrow = c(1, 2))
+
+plot(x = national_seq,
+     y = apply(national_sim, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "Expected Values",
+     cex.main = 0.7,
+     xlab = "Share of maximum cases (national or local)",
+     ylab = "Support anti-democratic reform", 
+     ylim = c(3.5, 3.8), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7,
+     xaxt = "n")
+axis(1, at = seq(0, 1, by = 0.1))
+
+# EVs for national and local cases
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national[2,]),QoI_ci_national[1,] ),
+    col = adjustcolor("grey", alpha = 0.8) ,
+    border = NA
+  )
+
+polygon(
+    c(rev(local_seq), local_seq),
+    c(rev(QoI_ci_local[2,]),QoI_ci_local[1,] ),
+    col = adjustcolor("lightgrey", alpha = 0.4) ,
+    border = NA
+  )
+
+lines(x = local_seq,
+      y = apply(national_sim, 2, mean),
+      lwd = 2)
+
+lines(x = local_seq,
+      y = apply(local_sim, 2, mean),
+      lwd = 2)
+
+# some annotations
+text(x = c(0.5, 0.5),
+     y = c(3.74, 3.63),
+     labels = c("national", "local"),
+     cex = 0.7,
+     pos = 4)
+
+# add distribution of actual observations of local cases
+rug(jitter(df$local, 0.1), ticksize = 0.02, lwd = 1)
+
+
+plot(x = local_seq,
+     y = apply(fd, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "First Difference (National vs. Local Cases)", 
+     cex.main = 0.7,
+     xlab = "Share of maximum cases",
+     ylab = "First Difference", 
+     ylim=c(-0.2, 0.1), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7)
+
+# FD Line
+lines(x = local_seq,
+      y = apply(fd, 2, mean),
+      lwd = 2)
+
+# CIs
+lines(x = local_seq,
+      y = apply(fd, 2, quantile, 0.025),
+      lty = "dashed")
+lines(x = local_seq,
+      y = apply(fd, 2, quantile, 0.975),
+      lty = "dashed")
+
+# Horizontal line at y = 0
+
+abline(h = 0, 
+       lwd = 1,
+       lty = 1)
+dev.off()
+
+
+```
+
+## Interaction Model M2
+
+The following chunk estimates the interaction model and sets local infections to 0.1, 0.3, and 0.7 while ranging across national cases from 0 to 1. It then plots the results presented in figure 5.
+
+```{r Interaction Model M2 and simulate EVs, warning = FALSE}
+
+m2 <- lm(predicted_rights ~ local * national + factor(state), df)
+
+
+national_seq <- seq(0,1, length.out = 100)
+local_seq <-    seq(0,1, length.out = 100)
+
+
+scenario1_2a <- cbind(1, 0.1, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.1*national_seq)
+scenario1_2b <- cbind(1, 0.3, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.3*national_seq)
+scenario1_2c <- cbind(1, 0.7, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.7*national_seq)
+
+
+national_sim_a <- sim_function(coefs = coef(m2),
+                    vcov =  vcov(m2),
+                    scenario = scenario1_2a,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_b <- sim_function(coefs = coef(m2),
+                    vcov =  vcov(m2),
+                    scenario = scenario1_2b,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_c <- sim_function(coefs = coef(m2),
+                    vcov =  vcov(m2),
+                    scenario = scenario1_2c,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+
+QoI_ci_national_a <- apply(national_sim_a, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_b <- apply(national_sim_b, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_c <- apply(national_sim_c, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+
+fd_national_10_70 <- national_sim_c - national_sim_a
+
+
+```
+
+
+
+```{r Plot interaction EVs and FDs M2, warning = FALSE}
+
+pdf("figures/m2_ev.pdf",
+    width = 8,
+    height = 5)
+
+par(mfrow = c(1, 2))
+
+plot(x = national_seq,
+     y = apply(national_sim_a, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "Expected Values",
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "Support anti-democratic reform", 
+     ylim = c(3.5, 3.9), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7,
+     xaxt = "n")
+axis(1, at = seq(0, 1, by = 0.1))
+
+# EVs for national and local cases
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_a[2,]),QoI_ci_national_a[1,] ),
+    col = adjustcolor("grey", alpha = 0.8) ,
+    border = NA
+  )
+
+
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_b[2,]),QoI_ci_national_b[1,] ),
+    col = adjustcolor("grey", alpha = 0.6) ,
+    border = NA
+  )
+
+
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_c[2,]),QoI_ci_national_c[1,] ),
+    col = adjustcolor("grey", alpha = 0.4) ,
+    border = NA
+  )
+
+lines(x = national_seq,
+      y = apply(national_sim_a, 2, mean),
+      lwd = 2, lty = 1)
+
+
+lines(x = national_seq,
+      y = apply(national_sim_b, 2, mean),
+      lwd = 2, lty = 2)
+
+
+lines(x = national_seq,
+      y = apply(national_sim_c, 2, mean),
+      lwd = 2, lty = 3)
+
+
+legend(0.1, 3.58, legend=c("Local Cases = 10%", "Local Cases = 30%", "Local Cases = 70%"),
+       lty=1:3, cex=0.8)
+
+
+
+plot(x = national_seq,
+     y = apply(fd_national_10_70, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "First Difference (70% vs. 10% in local cases)", 
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "First Difference", 
+     ylim=c(-0.2, 0.2), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7)
+
+# FD Line
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, mean),
+      lwd = 2)
+
+# CIs
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, quantile, 0.025),
+      lty = "dashed")
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, quantile, 0.975),
+      lty = "dashed")
+
+# Horizontal line at y = 0
+
+abline(h = 0, 
+       lwd = 1,
+       lty = 1)
+
+
+dev.off()
+
+```
+
+
+## Statistical Simulation for Real-life Cases
+To understand what the model means in practice, I simulate specific scenarios and estimate expected values for the areas of Regen and Munich on April 1st. I then plot them (figure not included in paper).
+
+```{r Simulate EVs and FDs for specific scenarios, warning = FALSE}
+
+
+scenario_munich <- cbind(1, 0.74, 0.2, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0.74*0.2)
+scenario_regen <- cbind(1, 0.1, 0.2, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0.1*0.2)
+
+munich_sim <- sim_function(coefs = coef(m2),
+                    vcov =  vcov(m2),
+                    scenario = scenario_munich,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+regen_sim <- sim_function(coefs = coef(m2),
+                    vcov =  vcov(m2),
+                    scenario = scenario_regen,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+munich_mean <- mean(munich_sim)
+munich_ci <- quantile(munich_sim, c(0.025, 0.975))
+  
+regen_mean <- mean(regen_sim)
+regen_ci <- quantile(regen_sim, c(0.025, 0.975))
+
+fd <- munich_sim - regen_sim
+mean_fd <- mean(fd)
+ci_fd <- quantile(fd, c(0.025, 0.975))
+
+
+```
+
+
+```{r Plot specific scenarios, warning = FALSE}
+
+pdf("figures/m2_scenarios.pdf",
+    width = 8,
+    height = 5)
+
+
+# Plot Expected Values
+plot(
+  x = seq(1, 2, 1),
+  y = seq(3, 4, 1),
+  pch = 19,
+  cex = 0.3,
+  bty = "n",
+  las = 1,
+  ylab = "Expected Value",
+  main = "",
+  xlab = "",
+  type = "n",
+  axes = FALSE,
+  ylim = c(3.6, 4.2),
+  xlim = c(1,3)
+)
+
+axis(side = 2, labels = TRUE)
+lines(x = c(1, 2),
+      y = c(0, 0),
+      lty = 1)
+
+mtext('Regen',
+      side = 1,
+      line = 1,
+      at = 1.25)
+mtext('Munich',
+      side = 1,
+      line = 1,
+      at = 2)
+
+
+# Shade backgrounds acc. to CI colors
+rect(
+  xleft = 1.225,
+  xright = 1.275,
+  ybottom = regen_ci[1],
+  ytop = regen_ci[2],
+  col = adjustcolor("grey50", alpha = 0.5),
+  border = NA
+)
+rect(
+  xleft = 1.975,
+  xright = 2.025,
+  ybottom = munich_ci[1],
+  ytop = munich_ci[2],
+  col = adjustcolor("grey70", alpha = 0.5),
+  border = NA
+)
+
+
+points(1.25,
+       regen_mean)
+
+points(2,
+       munich_mean)
+
+dev.off()
+
+```
+
+# Robustness Checks
+## Changing the Global Smoothing Technique (M3)
+
+What happens once we only use socio-demographic estimators for our global smoothing? The following chunk re-estimates model 2 on the basis of newly predicted local estimates of support. It then plots the results.
+
+```{r Robustness Global Smoothing socio only M3, warning = FALSE}
+
+
+model_rights_gov <- lmer(rights_gov ~ males_working_kreis_perc +
+                          females_working_kreis_perc +
+                          foreigners_working_kreis_perc +
+                          younger25_working_kreis_perc +
+                          older55_working_kreis_perc +
+                          commuter_working_kreis_perc +
+                          males_nonworking_kreis_perc +
+                          females_nonworking_kreis_perc +
+                          foreigners_nonworking_kreis_perc +
+                          younger25_nonworking_kreis_perc +
+                          older55_non_working_kreis_perc +
+                          longterm_nonworking_kreis_perc +
+                          (1 | state),
+                          na.action = na.exclude,
+                        data = df)
+
+
+
+
+# Save Predicitons
+df$predicted_rights2 <-
+  predict(model_rights_gov,
+          newdata = df,
+          allow.new.levels = TRUE)
+
+
+
+
+# Re-run main model
+
+m3 <- (lm(predicted_rights2 ~ local * national + factor(state), df))
+
+national_seq <- seq(0,1, length.out = 100)
+local_seq <-    seq(0,1, length.out = 100)
+
+
+scenario1_2a <- cbind(1, 0.1, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.1*national_seq)
+scenario1_2b <- cbind(1, 0.3, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.3*national_seq)
+scenario1_2c <- cbind(1, 0.7, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.7*national_seq)
+
+
+national_sim_a <- sim_function(coefs = coef(m3),
+                    vcov =  vcov(m3),
+                    scenario = scenario1_2a,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_b <- sim_function(coefs = coef(m3),
+                    vcov =  vcov(m3),
+                    scenario = scenario1_2b,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_c <- sim_function(coefs = coef(m3),
+                    vcov =  vcov(m3),
+                    scenario = scenario1_2c,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+
+QoI_ci_national_a <- apply(national_sim_a, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_b <- apply(national_sim_b, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_c <- apply(national_sim_c, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+
+fd_national_10_70 <- national_sim_c - national_sim_a
+
+
+
+
+pdf("figures/m3_ev.pdf",
+    width = 8,
+    height = 5)
+
+par(mfrow = c(1, 2))
+
+plot(x = national_seq,
+     y = apply(national_sim_a, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "Expected Values",
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "Support anti-democratic reform", 
+     ylim = c(3.5, 3.8), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7,
+     xaxt = "n")
+axis(1, at = seq(0, 1, by = 0.1))
+
+# EVs for national and local cases
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_a[2,]),QoI_ci_national_a[1,] ),
+    col = adjustcolor("grey", alpha = 0.8) ,
+    border = NA
+  )
+
+
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_b[2,]),QoI_ci_national_b[1,] ),
+    col = adjustcolor("grey", alpha = 0.6) ,
+    border = NA
+  )
+
+
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_c[2,]),QoI_ci_national_c[1,] ),
+    col = adjustcolor("grey", alpha = 0.4) ,
+    border = NA
+  )
+
+lines(x = national_seq,
+      y = apply(national_sim_a, 2, mean),
+      lwd = 2, lty = 1)
+
+
+lines(x = national_seq,
+      y = apply(national_sim_b, 2, mean),
+      lwd = 2, lty = 2)
+
+
+lines(x = national_seq,
+      y = apply(national_sim_c, 2, mean),
+      lwd = 2, lty = 3)
+
+
+legend(0.1, 3.57, legend=c("Local Cases = 10%", "Local Cases = 30%", "Local Cases = 70%"),
+       lty=1:3, cex=0.8)
+
+
+
+plot(x = national_seq,
+     y = apply(fd_national_10_70, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "First Difference (70% vs. 10% in local cases)", 
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "First Difference", 
+     ylim=c(-0.2, 0.1), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7)
+
+# FD Line
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, mean),
+      lwd = 2)
+
+# CIs
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, quantile, 0.025),
+      lty = "dashed")
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, quantile, 0.975),
+      lty = "dashed")
+
+# Horizontal line at y = 0
+
+abline(h = 0, 
+       lwd = 1,
+       lty = 1)
+
+dev.off()
+
+
+```
+
+
+## Changing the Global Smoothing Technique (M4)
+As above, I change smoothing to only use political indicators and then re-run the interaction model and plot expected values and first differences.
+
+```{r Robustness Global Smoothing political only M4, warning = FALSE}
+
+
+
+model_rights_gov <- lmer(rights_gov ~
+                          vs_cdu_kreis +
+                          vs_csu_kreis +
+                          vs_spd_kreis +
+                          vs_green_kreis +
+                          vs_fdp_kreis +
+                          vs_afd_kreis +
+                          vs_left_kreis +
+                          (1 | state),
+                         na.action = na.exclude,
+                         data = df)
+
+
+
+
+# Save Predictions
+df$predicted_rights3 <-
+  predict(model_rights_gov,
+          newdata = df,
+          allow.new.levels = TRUE)
+
+
+
+
+# Re-run main model
+
+m4 <- (lm(predicted_rights3 ~ local * national + factor(state), df))
+
+national_seq <- seq(0,1, length.out = 100)
+local_seq <-    seq(0,1, length.out = 100)
+
+
+scenario1_2a <- cbind(1, 0.1, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.1*national_seq)
+scenario1_2b <- cbind(1, 0.3, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.3*national_seq)
+scenario1_2c <- cbind(1, 0.7, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.7*national_seq)
+
+
+national_sim_a <- sim_function(coefs = coef(m4),
+                    vcov =  vcov(m4),
+                    scenario = scenario1_2a,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_b <- sim_function(coefs = coef(m4),
+                    vcov =  vcov(m4),
+                    scenario = scenario1_2b,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_c <- sim_function(coefs = coef(m4),
+                    vcov =  vcov(m4),
+                    scenario = scenario1_2c,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+
+QoI_ci_national_a <- apply(national_sim_a, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_b <- apply(national_sim_b, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_c <- apply(national_sim_c, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+
+fd_national_10_70 <- national_sim_c - national_sim_a
+
+
+
+
+pdf("figures/m4_ev.pdf",
+    width = 8,
+    height = 5)
+
+par(mfrow = c(1, 2))
+
+plot(x = national_seq,
+     y = apply(national_sim_a, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "Expected Values",
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "Support anti-democratic reform", 
+     ylim = c(3.6, 3.8), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7,
+     xaxt = "n")
+axis(1, at = seq(0, 1, by = 0.1))
+
+# EVs for national and local cases
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_a[2,]),QoI_ci_national_a[1,] ),
+    col = adjustcolor("grey", alpha = 0.8) ,
+    border = NA
+  )
+
+
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_b[2,]),QoI_ci_national_b[1,] ),
+    col = adjustcolor("grey", alpha = 0.6) ,
+    border = NA
+  )
+
+
+polygon(
+    c(rev(national_seq), national_seq),
+    c(rev(QoI_ci_national_c[2,]),QoI_ci_national_c[1,] ),
+    col = adjustcolor("grey", alpha = 0.4) ,
+    border = NA
+  )
+
+lines(x = national_seq,
+      y = apply(national_sim_a, 2, mean),
+      lwd = 2, lty = 1)
+
+
+lines(x = national_seq,
+      y = apply(national_sim_b, 2, mean),
+      lwd = 2, lty = 2)
+
+
+lines(x = national_seq,
+      y = apply(national_sim_c, 2, mean),
+      lwd = 2, lty = 3)
+
+
+legend(0.1, 3.65, legend=c("Local Cases = 10%", "Local Cases = 30%", "Local Cases = 70%"),
+       lty=1:3, cex=0.8)
+
+
+
+plot(x = national_seq,
+     y = apply(fd_national_10_70, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "First Difference (70% vs. 10% in local cases)", 
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "First Difference", 
+     ylim=c(-0.1, 0.1), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7)
+
+# FD Line
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, mean),
+      lwd = 2)
+
+# CIs
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, quantile, 0.025),
+      lty = "dashed")
+lines(x = national_seq,
+      y = apply(fd_national_10_70, 2, quantile, 0.975),
+      lty = "dashed")
+
+# Horizontal line at y = 0
+
+abline(h = 0, 
+       lwd = 1,
+       lty = 1)
+
+dev.off()
+
+
+```
+
+## Bootstrapping subsamples and re-estimating M2
+The following code investigates what changes occur when using 6 randomly drawn subsamples of the main sample and re-estimating the model. It then plots the results.
+
+```{r Bootstrap 6 subsamples with 2/3 of cases each, warning = FALSE}
+
+fd_sub <- matrix(NA, nrow = 100, ncol = 6)
+fd_ci_sub_l <- matrix(NA, nrow = 100, ncol = 6)
+fd_ci_sub_u <- matrix(NA, nrow = 100, ncol = 6)
+
+ 
+two_thirds <- round(((2/3)*nrow(df)), digits=0)
+df_sub_l <- list()
+df_sub_l[[1]] <- df[sample(nrow(df), size=two_thirds, replace = T),]
+df_sub_l[[2]] <- df[sample(nrow(df), size=two_thirds, replace = T),]
+df_sub_l[[3]] <- df[sample(nrow(df), size=two_thirds, replace = T),]
+df_sub_l[[4]] <- df[sample(nrow(df), size=two_thirds, replace = T),]
+df_sub_l[[5]] <- df[sample(nrow(df), size=two_thirds, replace = T),]
+df_sub_l[[6]] <- df[sample(nrow(df), size=two_thirds, replace = T),]
+
+
+
+for (i in 1:6) {
+  
+
+  df_sub <- as.data.frame(df_sub_l[[i]])
+
+
+model_rights_gov <- lmer(rights_gov ~ males_working_kreis_perc +
+                          females_working_kreis_perc +
+                          foreigners_working_kreis_perc +
+                          younger25_working_kreis_perc +
+                          older55_working_kreis_perc +
+                          commuter_working_kreis_perc +
+                          males_nonworking_kreis_perc +
+                          females_nonworking_kreis_perc +
+                          foreigners_nonworking_kreis_perc +
+                          younger25_nonworking_kreis_perc +
+                          older55_non_working_kreis_perc +
+                          longterm_nonworking_kreis_perc +
+                          vs_cdu_kreis +
+                          vs_csu_kreis +
+                          vs_spd_kreis +
+                          vs_green_kreis +
+                          vs_fdp_kreis +
+                          vs_afd_kreis +
+                          vs_left_kreis +
+                          (1 | state),
+                         na.action = na.exclude,
+                         data = df_sub)
+
+# Save Predictions
+df_sub$predicted_rights4 <-
+  predict(model_rights_gov,
+          newdata = df_sub,
+          allow.new.levels = TRUE)
+
+# Re-run main model
+
+m1_sub <- (lm(predicted_rights4 ~ local * national + factor(state), df_sub))
+
+
+national_seq <- seq(0,1, length.out = 100)
+local_seq <-    seq(0,1, length.out = 100)
+
+
+scenario1_2a <- cbind(1, 0.1, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.1*national_seq)
+scenario1_2b <- cbind(1, 0.3, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.3*national_seq)
+scenario1_2c <- cbind(1, 0.7, national_seq, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.7*national_seq)
+
+
+national_sim_a <- sim_function(coefs = coef(m1_sub),
+                    vcov =  vcov(m1_sub),
+                    scenario = scenario1_2a,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_b <- sim_function(coefs = coef(m1_sub),
+                    vcov =  vcov(m1_sub),
+                    scenario = scenario1_2b,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+national_sim_c <- sim_function(coefs = coef(m1_sub),
+                    vcov =  vcov(m1_sub),
+                    scenario = scenario1_2c,
+                    nsim = 10000,
+                    stochastic_component = stochastic_component)$ev
+
+
+QoI_ci_national_a <- apply(national_sim_a, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_b <- apply(national_sim_b, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+QoI_ci_national_c <- apply(national_sim_c, 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+
+fd_national_10_70 <- national_sim_c - national_sim_a
+
+
+
+fd_sub[,i] <- apply(fd_national_10_70, 2, mean)
+
+fd_ci_sub_l[,i] <- apply(fd_national_10_70, 2, quantile, 0.025)
+fd_ci_sub_u[,i] <- apply(fd_national_10_70, 2, quantile, 0.975)
+
+}
+
+
+
+```
+
+
+
+```{r Plot subsamples, warning = FALSE}
+
+colours <- viridis(6)
+
+pdf("figures/bs6_ev.pdf",
+    width = 8,
+    height = 5)
+
+plot(x = local_seq,
+     y = apply(fd_national_10_70, 2, mean),
+     type = "n",
+     lwd = 2,
+     main = "First Difference (70% vs. 10% in local cases)", 
+     cex.main = 0.7,
+     xlab = "Share of maximum national cases",
+     ylab = "First Difference", 
+     ylim=c(-0.8, 0.8), 
+     cex.axis = 0.7, 
+     cex.lab = 0.7)
+
+# FD Line
+for (i in 1:6) {
+  
+
+
+# CIs
+polygon(
+    c(rev(local_seq), local_seq),
+    c(rev(fd_ci_sub_u[,i]),fd_ci_sub_l[,i]),
+    col = adjustcolor(colours[i], alpha = 0.5) ,
+    border = NA
+)
+
+lines(x = local_seq,
+      y = fd_sub[,i],
+      lwd = 2,
+      colour=colours[i])
+
+
+}
+
+
+# Horizontal line at y = 0
+
+abline(h = 0, 
+       lwd = 1,
+       lty = 1)
+
+dev.off()
+
+```
+## Estimating the unsmoothed model
+Finally, I also estimate the model using the actual average support instead of the smoothed support.
+
+```{r Raw Model (without global smoothing), warning = FALSE}
+
+m5 <- lm(avg_opinion ~ local * national + factor(state), df)
+
+
+```
+
+
+# Exporting all results as LaTeX Table
+Here I print all models previously discussed to include them in a LaTeX table.
+```{r Export table, warning = FALSE}
+
+stargazer(m1,
+          m2, 
+          m3, 
+          m4,
+          m5,
+          title = "FE Analyses of Determinants of Anti-democratic Attitudes",
+          header=FALSE, 
+          type='latex',
+          star.cutoffs = c(0.10, 0.05, 0.01))
+          
+
+
+```
+
